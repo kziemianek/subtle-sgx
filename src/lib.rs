@@ -9,16 +9,94 @@
 // - Henry de Valence <hdevalence@hdevalence.ca>
 
 #![no_std]
-#![cfg_attr(feature = "nightly", feature(external_doc))]
-#![cfg_attr(feature = "nightly", doc(include = "../README.md"))]
-#![cfg_attr(feature = "nightly", deny(missing_docs))]
+#![deny(missing_docs)]
 #![doc(html_logo_url = "https://doc.dalek.rs/assets/dalek-logo-clear.png")]
-#![doc(html_root_url = "https://docs.rs/subtle/2.4.0")]
+#![doc(html_root_url = "https://docs.rs/subtle/2.5.0")]
 
 #![cfg_attr(all(target_env = "sgx", target_vendor = "mesalock"), feature(rustc_private))]
 
-//! Note that docs will only build on nightly Rust until
-//! [RFC 1990 stabilizes](https://github.com/rust-lang/rust/issues/44732).
+//! # subtle [![](https://img.shields.io/crates/v/subtle.svg)](https://crates.io/crates/subtle) [![](https://img.shields.io/badge/dynamic/json.svg?label=docs&uri=https%3A%2F%2Fcrates.io%2Fapi%2Fv1%2Fcrates%2Fsubtle%2Fversions&query=%24.versions%5B0%5D.num&colorB=4F74A6)](https://doc.dalek.rs/subtle) [![](https://travis-ci.org/dalek-cryptography/subtle.svg?branch=master)](https://travis-ci.org/dalek-cryptography/subtle)
+//!
+//! **Pure-Rust traits and utilities for constant-time cryptographic implementations.**
+//!
+//! It consists of a `Choice` type, and a collection of traits using `Choice`
+//! instead of `bool` which are intended to execute in constant-time.  The `Choice`
+//! type is a wrapper around a `u8` that holds a `0` or `1`.
+//!
+//! ```toml
+//! subtle = "2.5"
+//! ```
+//!
+//! This crate represents a “best-effort” attempt, since side-channels
+//! are ultimately a property of a deployed cryptographic system
+//! including the hardware it runs on, not just of software.
+//!
+//! The traits are implemented using bitwise operations, and should execute in
+//! constant time provided that a) the bitwise operations are constant-time and
+//! b) the bitwise operations are not recognized as a conditional assignment and
+//! optimized back into a branch.
+//!
+//! For a compiler to recognize that bitwise operations represent a conditional
+//! assignment, it needs to know that the value used to generate the bitmasks is
+//! really a boolean `i1` rather than an `i8` byte value. In an attempt to
+//! prevent this refinement, the crate tries to hide the value of a `Choice`'s
+//! inner `u8` by passing it through a volatile read. For more information, see
+//! the _About_ section below.
+//!
+//! Rust versions from 1.66 or higher support a new best-effort optimization
+//! barrier ([`core::hint::black_box`]).  To use the new optimization barrier,
+//! enable the `core_hint_black_box` feature.
+//!
+//! Rust versions from 1.51 or higher have const generics support. You may enable
+//! `const-generics` feautre to have `subtle` traits implemented for arrays `[T; N]`.
+//!
+//! Versions prior to `2.2` recommended use of the `nightly` feature to enable an
+//! optimization barrier; this is not required in versions `2.2` and above.
+//!
+//! Note: the `subtle` crate contains `debug_assert`s to check invariants during
+//! debug builds. These invariant checks involve secret-dependent branches, and
+//! are not present when compiled in release mode. This crate is intended to be
+//! used in release mode.
+//!
+//! ## Documentation
+//!
+//! Documentation is available [here][docs].
+//!
+//! ## Minimum Supported Rust Version
+//!
+//! Rust **1.41** or higher.
+//!
+//! Minimum supported Rust version can be changed in the future, but it will be done with a minor version bump.
+//!
+//! ## About
+//!
+//! This library aims to be the Rust equivalent of Go’s `crypto/subtle` module.
+//!
+//! Old versions of the optimization barrier in `impl From<u8> for Choice` were
+//! based on Tim Maclean's [work on `rust-timing-shield`][rust-timing-shield],
+//! which attempts to provide a more comprehensive approach for preventing
+//! software side-channels in Rust code.
+//!
+//! From version `2.2`, it was based on Diane Hosfelt and Amber Sprenkels' work on
+//! "Secret Types in Rust". Version `2.5` adds the `core_hint_black_box` feature,
+//! which uses the original method through the [`core::hint::black_box`] function
+//! from the Rust standard library.
+//!
+//! `subtle` is authored by isis agora lovecruft and Henry de Valence.
+//!
+//! ## Warning
+//!
+//! This code is a low-level library, intended for specific use-cases implementing
+//! cryptographic protocols.  It represents a best-effort attempt to protect
+//! against some software side-channels.  Because side-channel resistance is not a
+//! property of software alone, but of software together with hardware, any such
+//! effort is fundamentally limited.
+//!
+//! **USE AT YOUR OWN RISK**
+//!
+//! [docs]: https://docs.rs/subtle
+//! [`core::hint::black_box`]: https://doc.rust-lang.org/core/hint/fn.black_box.html
+//! [rust-timing-shield]: https://www.chosenplaintext.ca/open-source/rust-timing-shield/security
 
 #[cfg(all(feature = "std", target_env = "sgx"))]
 #[macro_use]
@@ -28,9 +106,7 @@ extern crate std;
 #[macro_use]
 extern crate sgx_tstd as std;
 
-#[cfg(test)]
-extern crate rand;
-
+use core::cmp;
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Neg, Not};
 use core::option::Option;
 
@@ -154,6 +230,7 @@ impl Not for Choice {
 /// Note: Rust's notion of "volatile" is subject to change over time. While this
 /// code may break in a non-destructive way in the future, “constant-time” code
 /// is a continually moving target, and this is better than doing nothing.
+#[cfg(not(feature = "core_hint_black_box"))]
 #[inline(never)]
 fn black_box(input: u8) -> u8 {
     debug_assert!((input == 0u8) | (input == 1u8));
@@ -169,6 +246,13 @@ fn black_box(input: u8) -> u8 {
         //   - u8 type is always properly aligned.
         core::ptr::read_volatile(&input as *const u8)
     }
+}
+
+#[cfg(feature = "core_hint_black_box")]
+#[inline(never)]
+fn black_box(input: u8) -> u8 {
+    debug_assert!((input == 0u8) | (input == 1u8));
+    core::hint::black_box(input)
 }
 
 impl From<u8> for Choice {
@@ -203,6 +287,19 @@ pub trait ConstantTimeEq {
     /// * `Choice(0u8)` if `self != other`.
     //#[inline]
     fn ct_eq(&self, other: &Self) -> Choice;
+
+    /// Determine if two items are NOT equal.
+    ///
+    /// The `ct_ne` function should execute in constant time.
+    ///
+    /// # Returns
+    ///
+    /// * `Choice(0u8)` if `self == other`;
+    /// * `Choice(1u8)` if `self != other`.
+    #[inline]
+    fn ct_ne(&self, other: &Self) -> Choice {
+        !self.ct_eq(other)
+    }
 }
 
 impl<T: ConstantTimeEq> ConstantTimeEq for [T] {
@@ -294,6 +391,14 @@ generate_integer_equal!(u64, i64, 64);
 generate_integer_equal!(u128, i128, 128);
 generate_integer_equal!(usize, isize, ::core::mem::size_of::<usize>() * 8);
 
+/// `Ordering` is `#[repr(i8)]` making it possible to leverage `i8::ct_eq`.
+impl ConstantTimeEq for cmp::Ordering {
+    #[inline]
+    fn ct_eq(&self, other: &Self) -> Choice {
+        (*self as i8).ct_eq(&(*other as i8))
+    }
+}
+
 /// A type which can be conditionally selected in constant time.
 ///
 /// This trait also provides generic implementations of conditional
@@ -311,7 +416,6 @@ pub trait ConditionallySelectable: Copy {
     /// # Example
     ///
     /// ```
-    /// # extern crate subtle;
     /// use subtle::ConditionallySelectable;
     /// #
     /// # fn main() {
@@ -334,7 +438,6 @@ pub trait ConditionallySelectable: Copy {
     /// # Example
     ///
     /// ```
-    /// # extern crate subtle;
     /// use subtle::ConditionallySelectable;
     /// #
     /// # fn main() {
@@ -360,7 +463,6 @@ pub trait ConditionallySelectable: Copy {
     /// # Example
     ///
     /// ```
-    /// # extern crate subtle;
     /// use subtle::ConditionallySelectable;
     /// #
     /// # fn main() {
@@ -455,10 +557,49 @@ generate_integer_conditional_select!( u64  i64);
 #[cfg(feature = "i128")]
 generate_integer_conditional_select!(u128 i128);
 
+/// `Ordering` is `#[repr(i8)]` where:
+///
+/// - `Less` => -1
+/// - `Equal` => 0
+/// - `Greater` => 1
+///
+/// Given this, it's possible to operate on orderings as if they're integers,
+/// which allows leveraging conditional masking for predication.
+impl ConditionallySelectable for cmp::Ordering {
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        let a = *a as i8;
+        let b = *b as i8;
+        let ret = i8::conditional_select(&a, &b, choice);
+
+        // SAFETY: `Ordering` is `#[repr(i8)]` and `ret` has been assigned to
+        // a value which was originally a valid `Ordering` then cast to `i8`
+        unsafe { *((&ret as *const _) as *const cmp::Ordering) }
+    }
+}
+
 impl ConditionallySelectable for Choice {
     #[inline]
     fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
         Choice(u8::conditional_select(&a.0, &b.0, choice))
+    }
+}
+
+#[cfg(feature = "const-generics")]
+impl<T, const N: usize> ConditionallySelectable for [T; N]
+where
+    T: ConditionallySelectable,
+{
+    #[inline]
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        let mut output = *a;
+        output.conditional_assign(b, choice);
+        output
+    }
+
+    fn conditional_assign(&mut self, other: &Self, choice: Choice) {
+        for (a_i, b_i) in self.iter_mut().zip(other) {
+            a_i.conditional_assign(b_i, choice)
+        }
     }
 }
 
@@ -549,6 +690,18 @@ impl<T> CtOption<T> {
         }
     }
 
+    /// Returns the contained value, consuming the `self` value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is none with a custom panic message provided by
+    /// `msg`.
+    pub fn expect(self, msg: &str) -> T {
+        assert_eq!(self.is_some.unwrap_u8(), 1, "{}", msg);
+
+        self.value
+    }
+
     /// This returns the underlying value but panics if it
     /// is not `Some`.
     #[inline]
@@ -570,6 +723,9 @@ impl<T> CtOption<T> {
 
     /// This returns the underlying value if it is `Some`
     /// or the value produced by the provided closure otherwise.
+    ///
+    /// This operates in constant time, because the provided closure
+    /// is always called.
     #[inline]
     pub fn unwrap_or_else<F>(self, f: F) -> T
     where
@@ -692,7 +848,6 @@ pub trait ConstantTimeGreater {
     /// # Example
     ///
     /// ```
-    /// # extern crate subtle;
     /// use subtle::ConstantTimeGreater;
     ///
     /// let x: u8 = 13;
@@ -745,7 +900,7 @@ macro_rules! generate_unsigned_integer_greater {
                 Choice::from((bit & 1) as u8)
             }
         }
-    }
+    };
 }
 
 generate_unsigned_integer_greater!(u8, 8);
@@ -754,6 +909,16 @@ generate_unsigned_integer_greater!(u32, 32);
 generate_unsigned_integer_greater!(u64, 64);
 #[cfg(feature = "i128")]
 generate_unsigned_integer_greater!(u128, 128);
+
+impl ConstantTimeGreater for cmp::Ordering {
+    #[inline]
+    fn ct_gt(&self, other: &Self) -> Choice {
+        // No impl of `ConstantTimeGreater` for `i8`, so use `u8`
+        let a = (*self as i8) + 1;
+        let b = (*other as i8) + 1;
+        (a as u8).ct_gt(&(b as u8))
+    }
+}
 
 /// A type which can be compared in some manner and be determined to be less
 /// than another of the same type.
@@ -776,7 +941,6 @@ pub trait ConstantTimeLess: ConstantTimeEq + ConstantTimeGreater {
     /// # Example
     ///
     /// ```
-    /// # extern crate subtle;
     /// use subtle::ConstantTimeLess;
     ///
     /// let x: u8 = 13;
@@ -806,3 +970,13 @@ impl ConstantTimeLess for u32 {}
 impl ConstantTimeLess for u64 {}
 #[cfg(feature = "i128")]
 impl ConstantTimeLess for u128 {}
+
+impl ConstantTimeLess for cmp::Ordering {
+    #[inline]
+    fn ct_lt(&self, other: &Self) -> Choice {
+        // No impl of `ConstantTimeLess` for `i8`, so use `u8`
+        let a = (*self as i8) + 1;
+        let b = (*other as i8) + 1;
+        (a as u8).ct_lt(&(b as u8))
+    }
+}
